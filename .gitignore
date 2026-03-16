@@ -1,0 +1,21 @@
+# virtual environment
+omini-financial-datalake/
+venv/
+.env/
+
+# python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# data files
+data/
+
+# OS files
+.DS_Store
+
+# logs
+*.log
+
+omini-financial-datalake/
+data/
