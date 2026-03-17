@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 @log_execution
 def process_stock(symbol: str) -> None:
     yf_symbol = f"{symbol}.NS"
-    file_path = Path("data/raw") / f"{symbol}.csv"
+    file_path = Path("data/raw/pricing") / f"{symbol}.csv"
 
     logger.info("Fetching historical data for %s", symbol)
 
