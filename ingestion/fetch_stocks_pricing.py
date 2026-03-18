@@ -12,12 +12,12 @@ logger = get_logger(__name__)
 @log_execution
 def process_stock(symbol: str) -> None:
     yf_symbol = f"{symbol}.NS"
-    file_path = Path("data/raw/pricing") / f"{symbol}.csv"
+    file_path = Path("data/raw") / f"{symbol}.csv"
 
     logger.info("Fetching historical data for %s", symbol)
 
     ticker = yf.Ticker(yf_symbol)
-    df = ticker.history(period="max", auto_adjust=False)
+    df = ticker.history(period="2y", auto_adjust=False)
 
     if df.empty:
         logger.warning("No data found for %s", symbol)
@@ -87,5 +87,9 @@ def process_stock(symbol: str) -> None:
         logger.info("Appended latest row to %s", file_path)
 
 
-if __name__ == "__main__":
+def main():
     process_stock("TCS")
+
+
+if __name__ == "__main__":
+    main()
