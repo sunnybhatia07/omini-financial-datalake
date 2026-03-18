@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -88,7 +89,24 @@ def process_stock(symbol: str) -> None:
 
 
 def main():
-    process_stock("TCS")
+    list_path = Path("data/stocks_list.csv")
+    
+    if not list_path.exists():
+        logger.error("Stock list not found at %s", list_path)
+        return
+
+    df_symbols = pd.read_csv(list_path)
+    symbols = df_symbols["Symbol"].tolist()
+
+    logger.info("Starting pricing fetch for %d stocks...", len(symbols))
+
+    for i, symbol in enumerate(symbols, 1):
+        logger.info("Processing Pricing %d/%d: %s", i, len(symbols), symbol)
+        try:
+            process_stock(symbol)
+            time.sleep(1) 
+        except Exception as e:
+            logger.error("Failed to process %s: %s", symbol, e)
 
 
 if __name__ == "__main__":
