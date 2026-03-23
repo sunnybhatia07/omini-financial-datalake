@@ -16,14 +16,11 @@ def process_stock(symbol: str) -> None:
     yf_symbol = f"{symbol}.NS"
     file_path = Path("data/raw") / f"{symbol}.csv"
 
-    logger.info("Fetching historical data for %s", symbol)
-
     ticker = yf.Ticker(yf_symbol)
     df = ticker.history(period="2y", auto_adjust=False)
 
     if df.empty:
-        logger.warning("No data found for %s", symbol)
-        return
+        raise ValueError(f"No data found for {symbol}")
 
     df = df.reset_index()
     df["Date"] = pd.to_datetime(df["Date"]).dt.tz_localize(None)
@@ -82,11 +79,9 @@ def process_stock(symbol: str) -> None:
 
     if not file_path.exists():
         df_final.to_csv(file_path, index=False)
-        logger.info("Created %s with %d rows", file_path, len(df_final))
     else:
         today_row = df_final.tail(1)
         today_row.to_csv(file_path, mode="a", header=False, index=False)
-        logger.info("Appended latest row to %s", file_path)
 
 
 def main():
@@ -96,15 +91,34 @@ def main():
         logger.error("Failed to retrieve live stock list. Aborting pricing fetch.")
         return
 
-    logger.info("Starting pricing fetch for %d stocks...", len(symbols))
+    total_symbols = len(symbols)
+    success_count = 0
+    fail_count = 0
+
+    logger.info("Starting pricing fetch for %d stocks...", total_symbols)
 
     for i, symbol in enumerate(symbols, 1):
-        logger.info("Processing Pricing %d/%d: %s", i, len(symbols), symbol)
+        remaining = total_symbols - i
+        
         try:
             process_stock(symbol)
+            success_count += 1
+            logger.info(
+                "[%d/%d] Processed %s | Success: %d | Failed: %d | Remaining: %d",
+                i, total_symbols, symbol, success_count, fail_count, remaining
+            )
             time.sleep(1) 
         except Exception as e:
-            logger.error("Failed to process %s: %s", symbol, e)
+            fail_count += 1
+            logger.error(
+                "[%d/%d] Failed %s: %s | Success: %d | Failed: %d | Remaining: %d",
+                i, total_symbols, symbol, e, success_count, fail_count, remaining
+            )
+
+    logger.info(
+        "Fetch Complete! Total: %d | Success: %d | Failed: %d",
+        total_symbols, success_count, fail_count
+    )
 
 
 if __name__ == "__main__":
