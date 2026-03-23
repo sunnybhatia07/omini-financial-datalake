@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
+from ingestion.fetch_stocks_list import fetch_stock_list
 from utils.decorators import log_execution
 from utils.logger import get_logger
 
@@ -89,14 +90,11 @@ def process_stock(symbol: str) -> None:
 
 
 def main():
-    list_path = Path("data/stocks_list.csv")
-    
-    if not list_path.exists():
-        logger.error("Stock list not found at %s", list_path)
-        return
+    symbols = fetch_stock_list()
 
-    df_symbols = pd.read_csv(list_path)
-    symbols = df_symbols["Symbol"].tolist()
+    if not symbols:
+        logger.error("Failed to retrieve live stock list. Aborting pricing fetch.")
+        return
 
     logger.info("Starting pricing fetch for %d stocks...", len(symbols))
 
