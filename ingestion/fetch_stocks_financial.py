@@ -50,14 +50,13 @@ def process_financials(symbol: str) -> None:
         "Total Liabilities Net Minority Interest",
         "Stockholders Equity",
         "Operating Cash Flow",
-        "Free Cash Flow"
+        "Free Cash Flow",
     ]
 
     final_columns = [col for col in desired_columns if col in df_combined.columns]
     df_final = df_combined[final_columns].copy()
 
     file_path.parent.mkdir(parents=True, exist_ok=True)
-
     df_final.to_csv(file_path, index=False)
 
 
@@ -71,12 +70,13 @@ def main():
     total_symbols = len(symbols)
     success_count = 0
     fail_count = 0
+    failed_symbols = []
 
     logger.info("Starting financials fetch for %d stocks...", total_symbols)
 
     for i, symbol in enumerate(symbols, 1):
         remaining = total_symbols - i
-        
+
         try:
             process_financials(symbol)
             success_count += 1
@@ -84,9 +84,11 @@ def main():
                 "[%d/%d] Processed %s | Success: %d | Failed: %d | Remaining: %d",
                 i, total_symbols, symbol, success_count, fail_count, remaining
             )
-            time.sleep(1.5) 
+            time.sleep(1.5)
+
         except Exception as e:
             fail_count += 1
+            failed_symbols.append(symbol)
             logger.error(
                 "[%d/%d] Failed %s: %s | Success: %d | Failed: %d | Remaining: %d",
                 i, total_symbols, symbol, e, success_count, fail_count, remaining
@@ -96,6 +98,15 @@ def main():
         "Financials Fetch Complete! Total: %d | Success: %d | Failed: %d",
         total_symbols, success_count, fail_count
     )
+
+    if failed_symbols:
+        logger.warning(
+            "Failed financial symbols (%d): %s",
+            len(failed_symbols),
+            failed_symbols
+        )
+    else:
+        logger.info("No financial ingestion failures detected.")
 
 
 if __name__ == "__main__":
