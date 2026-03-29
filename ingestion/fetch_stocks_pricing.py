@@ -80,8 +80,21 @@ def process_stock(symbol: str) -> None:
     if not file_path.exists():
         df_final.to_csv(file_path, index=False)
     else:
-        today_row = df_final.tail(1)
-        today_row.to_csv(file_path, mode="a", header=False, index=False)
+        try:
+            existing_dates = pd.read_csv(file_path, usecols=["Date"])
+            
+            if not existing_dates.empty:
+                last_saved_date = pd.to_datetime(existing_dates["Date"].iloc[-1])
+                new_rows = df_final[df_final["Date"] > last_saved_date]
+                
+                if not new_rows.empty:
+                    new_rows.to_csv(file_path, mode="a", header=False, index=False)
+            else:
+                df_final.to_csv(file_path, index=False)
+                
+        except Exception as e:
+            logger.warning("Could not read existing file for %s (%s). Overwriting.", symbol, e)
+            df_final.to_csv(file_path, index=False)
 
 
 def main():
