@@ -17,14 +17,22 @@ def process_stock(symbol: str) -> None:
     file_path = Path("data/raw") / f"{symbol}.csv"
 
     ticker = yf.Ticker(yf_symbol)
+    
+    
     df = ticker.history(period="5y", auto_adjust=False)
 
     if df.empty:
         raise ValueError(f"No data found for {symbol}")
 
+    try:
+        industry = ticker.info.get("industry", "Unknown")
+    except Exception:
+        industry = "Unknown"
+
     df = df.reset_index()
     df["Date"] = pd.to_datetime(df["Date"]).dt.tz_localize(None)
     df["Symbol"] = symbol
+    df["Industry"] = industry
 
     df["Daily Return (%)"] = df["Adj Close"].pct_change() * 100
     df["Intraday Volatility (%)"] = ((df["High"] - df["Low"]) / df["Open"]) * 100
@@ -53,6 +61,7 @@ def process_stock(symbol: str) -> None:
     columns = [
         "Date",
         "Symbol",
+        "Industry",
         "Open",
         "High",
         "Low",
@@ -141,8 +150,6 @@ def main():
             len(failed_symbols),
             failed_symbols
         )
-    else:
-        logger.info("No pricing ingestion failures detected.")
 
 
 if __name__ == "__main__":
