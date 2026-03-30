@@ -14,11 +14,12 @@ logger = get_logger(__name__)
 @log_execution
 def process_stock(symbol: str) -> None:
     yf_symbol = f"{symbol}.NS"
-    file_path = Path("data/raw") / f"{symbol}.csv"
+
+    file_path = Path("data/raw") / f"{symbol}.parquet"
 
     ticker = yf.Ticker(yf_symbol)
     
-    
+
     df = ticker.history(period="5y", auto_adjust=False)
 
     if df.empty:
@@ -87,23 +88,24 @@ def process_stock(symbol: str) -> None:
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not file_path.exists():
-        df_final.to_csv(file_path, index=False)
+        df_final.to_parquet(file_path, index=False)
     else:
         try:
-            existing_dates = pd.read_csv(file_path, usecols=["Date"])
+            existing_df = pd.read_parquet(file_path)
             
-            if not existing_dates.empty:
-                last_saved_date = pd.to_datetime(existing_dates["Date"].iloc[-1])
+            if not existing_df.empty:
+                last_saved_date = pd.to_datetime(existing_df["Date"].iloc[-1])
                 new_rows = df_final[df_final["Date"] > last_saved_date]
                 
                 if not new_rows.empty:
-                    new_rows.to_csv(file_path, mode="a", header=False, index=False)
+                    updated_df = pd.concat([existing_df, new_rows], ignore_index=True)
+                    updated_df.to_parquet(file_path, index=False)
             else:
-                df_final.to_csv(file_path, index=False)
+                df_final.to_parquet(file_path, index=False)
                 
         except Exception as e:
             logger.warning("Could not read existing file for %s (%s). Overwriting.", symbol, e)
-            df_final.to_csv(file_path, index=False)
+            df_final.to_parquet(file_path, index=False)
 
 
 def main():
