@@ -17,7 +17,7 @@ def process_stock(symbol: str) -> None:
     file_path = Path("data/raw") / f"{symbol}.csv"
 
     ticker = yf.Ticker(yf_symbol)
-    df = ticker.history(period="2y", auto_adjust=False)
+    df = ticker.history(period="5y", auto_adjust=False)
 
     if df.empty:
         raise ValueError(f"No data found for {symbol}")
