@@ -2,7 +2,6 @@ from datetime import datetime
 import pytz
 import yfinance as yf
 
-from ingestion.fetch_stocks_financial import main as fetch_financials
 from ingestion.fetch_stocks_pricing import main as fetch_pricing
 from utils.logger import get_logger
 
@@ -26,15 +25,12 @@ def did_market_trade_today() -> bool:
 
 def main():
     if did_market_trade_today():
-        logger.info("Starting pipeline: Step 1/2 - Pricing Ingestion")
+        logger.info("Starting pipeline: Pricing Ingestion")
         fetch_pricing()
+        logger.info("Data lake pipeline complete.")
     else:
         logger.info("Market did not trade today. Skipping pricing ingestion.")
-
-    logger.info("Starting pipeline: Step 2/2 - Financials Ingestion")
-    fetch_financials()
-
-    logger.info("Data lake pipeline complete.")
+        logger.info("Data lake pipeline complete.")
 
 
 if __name__ == "__main__":
