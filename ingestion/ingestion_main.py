@@ -2,7 +2,7 @@ from datetime import datetime
 import pytz
 import yfinance as yf
 
-from ingestion.fetch_stocks_pricing import main as fetch_pricing
+from .fetch_stocks_pricing import main as fetch_pricing
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
