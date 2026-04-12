@@ -2,3 +2,4 @@ nsepython
 yfinance
 pandas
 pytz
+pyarrow
