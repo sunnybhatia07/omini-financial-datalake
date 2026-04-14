@@ -1,157 +1,132 @@
 import time
-from pathlib import Path
+from datetime import datetime
 
 import pandas as pd
+import pytz
 import yfinance as yf
 
 from ingestion.fetch_stocks_list import fetch_stock_list
 from utils.decorators import log_execution
 from utils.logger import get_logger
+from utils.s3_helper import write_parquet_to_s3
 
 logger = get_logger(__name__)
 
 
-@log_execution
-def process_stock(symbol: str) -> None:
-    yf_symbol = f"{symbol}.NS"
-
-    file_path = Path("data/raw") / f"{symbol}.parquet"
-
-    ticker = yf.Ticker(yf_symbol)
-    
-
-    df = ticker.history(period="5y", auto_adjust=False)
-
-    if df.empty:
-        raise ValueError(f"No data found for {symbol}")
-
+def process_stock(symbol: str) -> pd.DataFrame | None:
+    """
+    Fetch raw OHLCV data for a single stock from yfinance.
+    Returns only today's row — no feature engineering.
+    Feature engineering happens in Silver layer.
+    """
     try:
-        industry = ticker.info.get("industry", "Unknown")
-    except Exception:
-        industry = "Unknown"
+        ticker = yf.Ticker(f"{symbol}.NS")
 
-    df = df.reset_index()
-    df["Date"] = pd.to_datetime(df["Date"]).dt.tz_localize(None)
-    df["Symbol"] = symbol
-    df["Industry"] = industry
+        # Fetch 5 days to ensure we catch today
+        # (yfinance sometimes delays by 1 day)
+        df = ticker.history(period="5d", auto_adjust=False)
 
-    df["Daily Return (%)"] = df["Adj Close"].pct_change() * 100
-    df["Intraday Volatility (%)"] = ((df["High"] - df["Low"]) / df["Open"]) * 100
-    df["Overnight Gap (%)"] = (
-        (df["Open"] - df["Close"].shift(1)) / df["Close"].shift(1)
-    ) * 100
-    df["Typical Price"] = (df["High"] + df["Low"] + df["Close"]) / 3
-    df["Estimated Turnover"] = df["Typical Price"] * df["Volume"]
+        if df.empty:
+            logger.warning("No data returned for %s, skipping.", symbol)
+            return None
 
-    df["Prev Close"] = df["Close"].shift(1)
-    df["TR1"] = df["High"] - df["Low"]
-    df["TR2"] = abs(df["High"] - df["Prev Close"])
-    df["TR3"] = abs(df["Low"] - df["Prev Close"])
-    df["True Range"] = df[["TR1", "TR2", "TR3"]].max(axis=1)
+        df = df.reset_index()
+        df["Date"] = pd.to_datetime(df["Date"]).dt.tz_localize(None)
+        df["Symbol"] = symbol
 
-    df["20-Day SMA"] = df["Close"].rolling(window=20).mean()
-    df["50-Day SMA"] = df["Close"].rolling(window=50).mean()
-    df["200-Day SMA"] = df["Close"].rolling(window=200).mean()
+        # Keep only raw columns — no calculations here
+        raw_columns = [
+            "Date",
+            "Symbol",
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Adj Close",
+            "Volume",
+            "Dividends",
+            "Stock Splits",
+        ]
 
-    delta = df["Close"].diff()
-    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df["14-Day RSI"] = 100 - (100 / (1 + rs))
+        df = df[raw_columns].copy()
 
-    columns = [
-        "Date",
-        "Symbol",
-        "Industry",
-        "Open",
-        "High",
-        "Low",
-        "Close",
-        "Adj Close",
-        "Volume",
-        "Dividends",
-        "Stock Splits",
-        "Daily Return (%)",
-        "Intraday Volatility (%)",
-        "Overnight Gap (%)",
-        "Typical Price",
-        "Estimated Turnover",
-        "True Range",
-        "20-Day SMA",
-        "50-Day SMA",
-        "200-Day SMA",
-        "14-Day RSI",
-    ]
+        # Return only today's row
+        ist = pytz.timezone("Asia/Kolkata")
+        today = datetime.now(ist).date()
+        df_today = df[df["Date"].dt.date == today]
 
-    df_final = df[columns].copy()
+        if df_today.empty:
+            logger.warning("No data for today for %s, skipping.", symbol)
+            return None
 
-    file_path.parent.mkdir(parents=True, exist_ok=True)
+        return df_today
 
-    if not file_path.exists():
-        df_final.to_parquet(file_path, index=False)
-    else:
-        try:
-            existing_df = pd.read_parquet(file_path)
-            
-            if not existing_df.empty:
-                last_saved_date = pd.to_datetime(existing_df["Date"].iloc[-1])
-                new_rows = df_final[df_final["Date"] > last_saved_date]
-                
-                if not new_rows.empty:
-                    updated_df = pd.concat([existing_df, new_rows], ignore_index=True)
-                    updated_df.to_parquet(file_path, index=False)
-            else:
-                df_final.to_parquet(file_path, index=False)
-                
-        except Exception as e:
-            logger.warning("Could not read existing file for %s (%s). Overwriting.", symbol, e)
-            df_final.to_parquet(file_path, index=False)
+    except Exception as e:
+        logger.error("Failed to process %s: %s", symbol, e)
+        return None
 
 
+@log_execution
 def main():
     symbols = fetch_stock_list()
 
     if not symbols:
-        logger.error("Failed to retrieve live stock list. Aborting pricing fetch.")
+        logger.error("Failed to retrieve stock list. Aborting.")
         return
 
-    total_symbols = len(symbols)
+    total = len(symbols)
+    all_dfs = []
     success_count = 0
     fail_count = 0
     failed_symbols = []
 
-    logger.info("Starting pricing fetch for %d stocks...", total_symbols)
+    logger.info("Starting bronze ingestion for %d stocks...", total)
 
     for i, symbol in enumerate(symbols, 1):
-        remaining = total_symbols - i
+        df = process_stock(symbol)
 
-        try:
-            process_stock(symbol)
+        if df is not None:
+            all_dfs.append(df)
             success_count += 1
-            logger.info(
-                "[%d/%d] Processed %s | Success: %d | Failed: %d | Remaining: %d",
-                i, total_symbols, symbol, success_count, fail_count, remaining
-            )
-            time.sleep(1)
-        except Exception as e:
+        else:
             fail_count += 1
             failed_symbols.append(symbol)
-            logger.error(
-                "[%d/%d] Failed %s: %s | Success: %d | Failed: %d | Remaining: %d",
-                i, total_symbols, symbol, e, success_count, fail_count, remaining
-            )
+
+        logger.info(
+            "[%d/%d] %s | Success: %d | Failed: %d | Remaining: %d",
+            i, total, symbol, success_count, fail_count, total - i
+        )
+
+        time.sleep(1)  # avoid yfinance rate limiting
+
+    # Nothing collected today — market holiday or all failed
+    if not all_dfs:
+        logger.error("No data collected today. Nothing written to S3.")
+        return
+
+    # Combine all stocks into one DataFrame
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+
+    # Build today's S3 partition path
+    ist = pytz.timezone("Asia/Kolkata")
+    today = datetime.now(ist).date()
+    s3_key = (
+        f"bronze/stocks/"
+        f"year={today.year}/"
+        f"month={today.month:02d}/"
+        f"day={today.day:02d}/"
+        f"data.parquet"
+    )
+
+    write_parquet_to_s3(combined_df, s3_key)
 
     logger.info(
-        "Fetch Complete! Total: %d | Success: %d | Failed: %d",
-        total_symbols, success_count, fail_count
+        "Bronze layer complete | Total: %d | Success: %d | Failed: %d",
+        total, success_count, fail_count
     )
 
     if failed_symbols:
-        logger.warning(
-            "Failed pricing symbols (%d): %s",
-            len(failed_symbols),
-            failed_symbols
-        )
+        logger.warning("Failed symbols (%d): %s", len(failed_symbols), failed_symbols)
 
 
 if __name__ == "__main__":
