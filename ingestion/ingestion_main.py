@@ -3,6 +3,7 @@ import pytz
 import yfinance as yf
 
 from .fetch_stocks_pricing import main as fetch_pricing
+from .fetch_stocks_fundamentals import main as fetch_fundamentals
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -27,6 +28,7 @@ def main():
     if did_market_trade_today():
         logger.info("Starting pipeline: Pricing Ingestion")
         fetch_pricing()
+        fetch_fundamentals()
         logger.info("Data lake pipeline complete.")
     else:
         logger.info("Market did not trade today. Skipping pricing ingestion.")
