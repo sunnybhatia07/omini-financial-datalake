@@ -1,6 +1,7 @@
 nsepython
 yfinance
 pandas
+numpy
 pytz
 pyarrow
 boto3

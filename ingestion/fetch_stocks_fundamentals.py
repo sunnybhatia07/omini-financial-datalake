@@ -2,6 +2,7 @@ import time
 from datetime import datetime
 
 import pandas as pd
+import numpy as np
 import pytz
 import yfinance as yf
 
@@ -111,6 +112,10 @@ def main():
     ist = pytz.timezone("Asia/Kolkata")
     today = datetime.now(ist).date()
     df["date"] = today
+
+    df = df.replace([float('inf'), float('-inf'), 'Infinity', '-Infinity'], None)
+    numeric_cols = [col for col in df.columns if col not in ['symbol', 'date']]
+    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
 
     # Build S3 partition path
     s3_key = (
