@@ -44,8 +44,6 @@ def process_stock(symbol: str) -> pd.DataFrame | None:
             "Close",
             "Adj Close",
             "Volume",
-            "Dividends",
-            "Stock Splits",
         ]
 
         df = df[raw_columns].copy()
