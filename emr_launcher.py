@@ -73,7 +73,6 @@ def launch_emr(mode: str) -> str:
                     "InstanceType":  "m5.xlarge",
                     "InstanceCount": 1,
                     "Market":        "SPOT",        # Core on spot to save cost
-                    "BidPrice":      "0.20",        # Max bid = on-demand price
                 },
             ],
             "KeepJobFlowAliveWhenNoSteps": False,  # Auto-terminate when done
