@@ -41,4 +41,9 @@ export PYTHONPATH="$REPO_DIR"
 echo "[$(date)] Running ingestion_main.py..." >> "$LOG_FILE"
 "$VENV_PYTHON" -m ingestion.ingestion_main >> "$LOG_FILE" 2>&1
 
+# 7. Run silver layer via Glue (daily)
+echo "[$(date)] Starting silver layer (Glue)..." >> "$LOG_FILE"
+"$VENV_PYTHON" glue_launcher.py >> "$LOG_FILE" 2>&1
+echo "[$(date)] Silver layer complete." >> "$LOG_FILE"
+
 echo "[$(date)] Pipeline execution finished." >> "$LOG_FILE"
