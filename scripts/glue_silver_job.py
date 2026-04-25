@@ -15,6 +15,10 @@ args = getResolvedOptions(sys.argv, ['JOB_NAME'])
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
+
+# FIX: Enable dynamic partition overwrite to protect historical data
+spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 

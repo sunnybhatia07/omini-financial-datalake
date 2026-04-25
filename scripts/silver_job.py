@@ -12,6 +12,7 @@ spark = SparkSession.builder \
     .appName("omini-silver") \
     .config("spark.sql.adaptive.enabled", "true") \
     .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+    .config("spark.sql.sources.partitionOverwriteMode", "dynamic") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
