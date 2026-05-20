@@ -1,3 +1,4 @@
+import argparse
 import time
 from datetime import datetime
 
@@ -10,6 +11,9 @@ from utils.logger import get_logger
 from utils.s3_helper import write_parquet_to_s3, list_s3_keys
 
 logger = get_logger(__name__)
+
+# Valid yfinance periods for reference
+VALID_PERIODS = ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"]
 
 
 def get_existing_partitions() -> set:
@@ -37,14 +41,16 @@ def get_existing_partitions() -> set:
     return existing
 
 
-def fetch_full_history(symbol: str) -> pd.DataFrame | None:
+def fetch_full_history(symbol: str, period: str) -> pd.DataFrame | None:
     """
-    Fetch maximum available history for a single stock.
+    Fetch stock history for a given period from yfinance.
     Returns raw OHLCV DataFrame — no feature engineering.
+
+    Valid periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
     """
     try:
         ticker = yf.Ticker(f"{symbol}.NS")
-        df = ticker.history(period="5y", auto_adjust=False)
+        df = ticker.history(period=period, auto_adjust=False)
 
         if df.empty:
             logger.warning("No data for %s, skipping.", symbol)
@@ -57,7 +63,7 @@ def fetch_full_history(symbol: str) -> pd.DataFrame | None:
         raw_columns = [
             "Date", "Symbol",
             "Open", "High", "Low", "Close", "Adj Close",
-            "Volume", "Dividends", "Stock Splits",
+            "Volume",
         ]
 
         return df[raw_columns].copy()
@@ -68,6 +74,24 @@ def fetch_full_history(symbol: str) -> pd.DataFrame | None:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Omini Bronze Backfill")
+    parser.add_argument(
+        "--period",
+        type=str,
+        default="5y",
+        choices=VALID_PERIODS,
+        help=(
+            "yfinance period to fetch. "
+            "Options: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max. "
+            "Default: 5y"
+        )
+    )
+    args = parser.parse_args()
+
+    logger.info("========================================")
+    logger.info("Bronze Backfill — Period: %s", args.period)
+    logger.info("========================================")
+
     symbols = fetch_stock_list()
 
     if not symbols:
@@ -80,7 +104,7 @@ def main():
     # Step 1 — fetch all stock histories
     all_dfs = []
     for i, symbol in enumerate(symbols, 1):
-        df = fetch_full_history(symbol)
+        df = fetch_full_history(symbol, args.period)
         if df is not None:
             all_dfs.append(df)
         logger.info("[%d/%d] Fetched %s", i, total, symbol)
@@ -96,12 +120,15 @@ def main():
     combined["Date"] = pd.to_datetime(combined["Date"])
 
     # Step 3 — check which partitions already exist in S3
+    # This ensures no duplicate data is written
     existing_partitions = get_existing_partitions()
 
     # Step 4 — group by date and write one file per trading day
     logger.info("Writing daily partitions to S3...")
     dates = combined["Date"].dt.date.unique()
     total_dates = len(dates)
+    written_count = 0
+    skipped_count = 0
 
     for i, date in enumerate(sorted(dates), 1):
         date_str = str(date)  # "2025-04-14"
@@ -109,6 +136,7 @@ def main():
         # Skip if already written — safe to re-run backfill anytime
         if date_str in existing_partitions:
             logger.info("[%d/%d] Skipping %s — already exists", i, total_dates, date_str)
+            skipped_count += 1
             continue
 
         # Filter all stocks for this specific date
@@ -127,12 +155,17 @@ def main():
         )
 
         write_parquet_to_s3(day_df, s3_key)
+        written_count += 1
         logger.info(
             "[%d/%d] Written %s → %d stocks",
             i, total_dates, date_str, len(day_df)
         )
 
+    logger.info("========================================")
     logger.info("Backfill complete!")
+    logger.info("Written: %d partitions | Skipped: %d partitions",
+                written_count, skipped_count)
+    logger.info("========================================")
 
 
 if __name__ == "__main__":
