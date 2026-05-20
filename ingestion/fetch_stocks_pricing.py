@@ -12,55 +12,77 @@ from utils.s3_helper import write_parquet_to_s3
 
 logger = get_logger(__name__)
 
+# ── Config ────────────────────────────────────────────────────────────────────
+BATCH_SIZE = 100  # number of stocks per yfinance batch request
+SLEEP_TIME = 2    # seconds between batches to avoid throttling
 
-def process_stock(symbol: str) -> pd.DataFrame | None:
+
+def chunk_list(lst: list, size: int):
+    """Split a list into chunks of given size."""
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
+
+
+def fetch_batch(symbols: list, today) -> pd.DataFrame | None:
     """
-    Fetch raw OHLCV data for a single stock from yfinance.
-    Returns only today's row — no feature engineering.
-    Feature engineering happens in Silver layer.
+    Fetch OHLCV data for a batch of stocks in one API call.
+
+    yfinance.download() fetches multiple tickers in one HTTP request
+    instead of one request per stock — much faster and less throttling risk.
+
+    Returns combined DataFrame for all stocks in the batch.
     """
+    tickers = " ".join([f"{s}.NS" for s in symbols])
+
     try:
-        ticker = yf.Ticker(f"{symbol}.NS")
-
-        # Fetch 5 days to ensure we catch today
-        # (yfinance sometimes delays by 1 day)
-        df = ticker.history(period="5d", auto_adjust=False)
+        df = yf.download(
+            tickers=tickers,
+            period="5d",
+            auto_adjust=False,
+            group_by="ticker",
+            progress=False,
+            threads=True,
+        )
 
         if df.empty:
-            logger.warning("No data returned for %s, skipping.", symbol)
+            logger.warning("Empty response for batch starting with: %s", symbols[:3])
             return None
 
-        df = df.reset_index()
-        df["Date"] = pd.to_datetime(df["Date"]).dt.tz_localize(None)
-        df["Symbol"] = symbol
+        all_rows = []
 
-        # Keep only raw columns — no calculations here
-        raw_columns = [
-            "Date",
-            "Symbol",
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Adj Close",
-            "Volume",
-        ]
+        if len(symbols) == 1:
+            # Single ticker — flat columns
+            symbol = symbols[0]
+            df = df.reset_index()
+            df["Date"] = pd.to_datetime(df["Date"]).dt.tz_localize(None)
+            df["Symbol"] = symbol
+            df_today = df[df["Date"].dt.date == today]
+            if not df_today.empty:
+                all_rows.append(df_today)
 
-        df = df[raw_columns].copy()
+        else:
+            # Multiple tickers — MultiIndex columns
+            for symbol in symbols:
+                ticker = f"{symbol}.NS"
+                try:
+                    stock_df = df[ticker].copy()
+                    stock_df = stock_df.reset_index()
+                    stock_df["Date"] = pd.to_datetime(stock_df["Date"]).dt.tz_localize(None)
+                    stock_df["Symbol"] = symbol
+                    df_today = stock_df[stock_df["Date"].dt.date == today]
+                    if not df_today.empty:
+                        all_rows.append(df_today)
+                except KeyError:
+                    logger.warning("No data for %s in batch response", symbol)
+                    continue
 
-        # Return only today's row
-        ist = pytz.timezone("Asia/Kolkata")
-        today = datetime.now(ist).date()
-        df_today = df[df["Date"].dt.date == today]
-
-        if df_today.empty:
-            logger.warning("No data for today for %s, skipping.", symbol)
+        if not all_rows:
             return None
 
-        return df_today
+        return pd.concat(all_rows, ignore_index=True)
 
     except Exception as e:
-        logger.error("Failed to process %s: %s", symbol, e)
+        logger.error("Batch fetch failed: %s", e)
         return None
 
 
@@ -73,41 +95,54 @@ def main():
         return
 
     total = len(symbols)
+    batches = list(chunk_list(symbols, BATCH_SIZE))
+    total_batches = len(batches)
+
+    ist = pytz.timezone("Asia/Kolkata")
+    today = datetime.now(ist).date()
+
+    logger.info("Starting batch bronze ingestion...")
+    logger.info("Total stocks: %d | Batch size: %d | Total batches: %d",
+                total, BATCH_SIZE, total_batches)
+
     all_dfs = []
     success_count = 0
     fail_count = 0
-    failed_symbols = []
 
-    logger.info("Starting bronze ingestion for %d stocks...", total)
+    for i, batch in enumerate(batches, 1):
+        logger.info("[Batch %d/%d] Fetching %d stocks...", i, total_batches, len(batch))
 
-    for i, symbol in enumerate(symbols, 1):
-        df = process_stock(symbol)
+        df = fetch_batch(batch, today)
 
-        if df is not None:
+        if df is not None and not df.empty:
+            # Count per stock accurately
+            stocks_returned = df["Symbol"].nunique()
+            success_count += stocks_returned
+            fail_count += len(batch) - stocks_returned
+
             all_dfs.append(df)
-            success_count += 1
+            logger.info("[Batch %d/%d] ✓ %d/%d stocks returned",
+                        i, total_batches, stocks_returned, len(batch))
         else:
-            fail_count += 1
-            failed_symbols.append(symbol)
+            # Entire batch failed
+            fail_count += len(batch)
+            logger.warning("[Batch %d/%d] ✗ No data returned for entire batch",
+                           i, total_batches)
 
-        logger.info(
-            "[%d/%d] %s | Success: %d | Failed: %d | Remaining: %d",
-            i, total, symbol, success_count, fail_count, total - i
-        )
+        if i < total_batches:
+            time.sleep(SLEEP_TIME)
 
-        time.sleep(1)  # avoid yfinance rate limiting
-
-    # Nothing collected today — market holiday or all failed
     if not all_dfs:
         logger.error("No data collected today. Nothing written to S3.")
         return
 
-    # Combine all stocks into one DataFrame
     combined_df = pd.concat(all_dfs, ignore_index=True)
 
-    # Build today's S3 partition path
-    ist = pytz.timezone("Asia/Kolkata")
-    today = datetime.now(ist).date()
+    # Keep only required columns
+    raw_columns = ["Date", "Symbol", "Open", "High", "Low", "Close", "Adj Close", "Volume"]
+    combined_df = combined_df[[c for c in raw_columns if c in combined_df.columns]]
+
+    # Write to S3
     s3_key = (
         f"bronze/stocks/"
         f"year={today.year}/"
@@ -118,13 +153,11 @@ def main():
 
     write_parquet_to_s3(combined_df, s3_key)
 
-    logger.info(
-        "Bronze layer complete | Total: %d | Success: %d | Failed: %d",
-        total, success_count, fail_count
-    )
-
-    if failed_symbols:
-        logger.warning("Failed symbols (%d): %s", len(failed_symbols), failed_symbols)
+    logger.info("========================================")
+    logger.info("Bronze ingestion complete!")
+    logger.info("Success: %d | Failed: %d | Total: %d | Rows written: %d",
+                success_count, fail_count, total, len(combined_df))
+    logger.info("========================================")
 
 
 if __name__ == "__main__":

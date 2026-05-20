@@ -12,8 +12,18 @@ from utils.s3_helper import write_parquet_to_s3, list_s3_keys
 
 logger = get_logger(__name__)
 
-# Valid yfinance periods for reference
+# ── Config ────────────────────────────────────────────────────────────────────
+BATCH_SIZE = 50   # smaller batch for backfill — more stable for long history
+SLEEP_TIME = 3    # slightly longer sleep for backfill to avoid throttling
+
+# Valid yfinance periods
 VALID_PERIODS = ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"]
+
+
+def chunk_list(lst: list, size: int):
+    """Split a list into chunks of given size."""
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
 
 
 def get_existing_partitions() -> set:
@@ -26,8 +36,6 @@ def get_existing_partitions() -> set:
     existing = set()
 
     for key in keys:
-        # Extract date from key like:
-        # bronze/stocks/year=2025/month=04/day=14/data.parquet
         try:
             parts = key.split("/")
             year  = parts[2].split("=")[1]
@@ -41,35 +49,59 @@ def get_existing_partitions() -> set:
     return existing
 
 
-def fetch_full_history(symbol: str, period: str) -> pd.DataFrame | None:
+def fetch_batch_history(symbols: list, period: str) -> pd.DataFrame | None:
     """
-    Fetch stock history for a given period from yfinance.
-    Returns raw OHLCV DataFrame — no feature engineering.
+    Fetch full history for a batch of stocks in one API call.
+    Returns combined DataFrame for all stocks in the batch.
+    """
+    tickers = " ".join([f"{s}.NS" for s in symbols])
 
-    Valid periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
-    """
     try:
-        ticker = yf.Ticker(f"{symbol}.NS")
-        df = ticker.history(period=period, auto_adjust=False)
+        df = yf.download(
+            tickers=tickers,
+            period=period,
+            auto_adjust=False,
+            group_by="ticker",
+            progress=False,
+            threads=True,
+        )
 
         if df.empty:
-            logger.warning("No data for %s, skipping.", symbol)
+            logger.warning("Empty response for batch starting with: %s", symbols[:3])
             return None
 
-        df = df.reset_index()
-        df["Date"] = pd.to_datetime(df["Date"]).dt.tz_localize(None)
-        df["Symbol"] = symbol
+        all_rows = []
 
-        raw_columns = [
-            "Date", "Symbol",
-            "Open", "High", "Low", "Close", "Adj Close",
-            "Volume",
-        ]
+        if len(symbols) == 1:
+            # Single ticker — flat columns
+            symbol = symbols[0]
+            df = df.reset_index()
+            df["Date"] = pd.to_datetime(df["Date"]).dt.tz_localize(None)
+            df["Symbol"] = symbol
+            all_rows.append(df)
 
-        return df[raw_columns].copy()
+        else:
+            # Multiple tickers — MultiIndex columns
+            for symbol in symbols:
+                ticker = f"{symbol}.NS"
+                try:
+                    stock_df = df[ticker].copy()
+                    stock_df = stock_df.reset_index()
+                    stock_df["Date"] = pd.to_datetime(stock_df["Date"]).dt.tz_localize(None)
+                    stock_df["Symbol"] = symbol
+                    if not stock_df.empty:
+                        all_rows.append(stock_df)
+                except KeyError:
+                    logger.warning("No data for %s in batch response", symbol)
+                    continue
+
+        if not all_rows:
+            return None
+
+        return pd.concat(all_rows, ignore_index=True)
 
     except Exception as e:
-        logger.error("Failed to fetch %s: %s", symbol, e)
+        logger.error("Batch fetch failed: %s", e)
         return None
 
 
@@ -99,28 +131,50 @@ def main():
         return
 
     total = len(symbols)
-    logger.info("Starting backfill for %d stocks...", total)
+    batches = list(chunk_list(symbols, BATCH_SIZE))
+    total_batches = len(batches)
 
-    # Step 1 — fetch all stock histories
+    logger.info("Total stocks: %d | Batch size: %d | Total batches: %d",
+                total, BATCH_SIZE, total_batches)
+
+    # Step 1 — fetch all stock histories in batches
     all_dfs = []
-    for i, symbol in enumerate(symbols, 1):
-        df = fetch_full_history(symbol, args.period)
-        if df is not None:
+    success_count = 0
+    fail_count = 0
+
+    for i, batch in enumerate(batches, 1):
+        logger.info("[Batch %d/%d] Fetching %d stocks...", i, total_batches, len(batch))
+
+        df = fetch_batch_history(batch, args.period)
+
+        if df is not None and not df.empty:
+            stocks_returned = df["Symbol"].nunique()
+            success_count += stocks_returned
+            fail_count += len(batch) - stocks_returned
             all_dfs.append(df)
-        logger.info("[%d/%d] Fetched %s", i, total, symbol)
-        time.sleep(1)  # avoid rate limiting
+            logger.info("[Batch %d/%d] ✓ %d/%d stocks returned",
+                        i, total_batches, stocks_returned, len(batch))
+        else:
+            fail_count += len(batch)
+            logger.warning("[Batch %d/%d] ✗ No data returned", i, total_batches)
+
+        if i < total_batches:
+            time.sleep(SLEEP_TIME)
 
     if not all_dfs:
         logger.error("No data fetched. Aborting.")
         return
 
-    # Step 2 — combine all stocks into one big DataFrame
+    # Step 2 — combine all batches
     logger.info("Combining all stock data...")
     combined = pd.concat(all_dfs, ignore_index=True)
     combined["Date"] = pd.to_datetime(combined["Date"])
 
-    # Step 3 — check which partitions already exist in S3
-    # This ensures no duplicate data is written
+    # Keep only required columns
+    raw_columns = ["Date", "Symbol", "Open", "High", "Low", "Close", "Adj Close", "Volume"]
+    combined = combined[[c for c in raw_columns if c in combined.columns]]
+
+    # Step 3 — check existing partitions to avoid duplicates
     existing_partitions = get_existing_partitions()
 
     # Step 4 — group by date and write one file per trading day
@@ -131,21 +185,18 @@ def main():
     skipped_count = 0
 
     for i, date in enumerate(sorted(dates), 1):
-        date_str = str(date)  # "2025-04-14"
+        date_str = str(date)
 
-        # Skip if already written — safe to re-run backfill anytime
         if date_str in existing_partitions:
             logger.info("[%d/%d] Skipping %s — already exists", i, total_dates, date_str)
             skipped_count += 1
             continue
 
-        # Filter all stocks for this specific date
         day_df = combined[combined["Date"].dt.date == date].copy()
 
         if day_df.empty:
             continue
 
-        # Build S3 partition path
         s3_key = (
             f"bronze/stocks/"
             f"year={date.year}/"
@@ -156,15 +207,13 @@ def main():
 
         write_parquet_to_s3(day_df, s3_key)
         written_count += 1
-        logger.info(
-            "[%d/%d] Written %s → %d stocks",
-            i, total_dates, date_str, len(day_df)
-        )
+        logger.info("[%d/%d] Written %s → %d stocks",
+                    i, total_dates, date_str, len(day_df))
 
     logger.info("========================================")
     logger.info("Backfill complete!")
-    logger.info("Written: %d partitions | Skipped: %d partitions",
-                written_count, skipped_count)
+    logger.info("Stocks — Success: %d | Failed: %d", success_count, fail_count)
+    logger.info("Dates  — Written: %d | Skipped: %d", written_count, skipped_count)
     logger.info("========================================")
 
 
